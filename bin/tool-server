@@ -1,0 +1,38 @@
+#!/bin/sh
+# Start the tool-server image in the foreground.
+#   --repl          serve from a background thread and give this terminal a
+#                   REPL into the live image (in package tool-server-user)
+#   --slynk[=PORT]  also start slynk on localhost PORT (default 4005)
+set -eu
+root=$(cd "$(dirname "$0")/.." && pwd)
+cd "$root"
+
+usage() { echo "usage: $0 [--repl] [--slynk[=PORT]]" >&2; exit 2; }
+
+mode=serve
+slynk=
+for arg in "$@"; do
+  case "$arg" in
+    --repl) mode=repl ;;
+    --slynk) slynk=4005 ;;
+    --slynk=*) slynk=${arg#--slynk=} ;;
+    *) usage ;;
+  esac
+done
+case "$slynk" in
+  *[!0-9]*) usage ;;
+esac
+
+load_asdf='(require :asdf)'
+load_system='(progn (asdf:load-asd (truename "tool-server.asd")) (asdf:load-system "tool-server"))'
+start_slynk='(progn)'
+[ -n "$slynk" ] && start_slynk="(handler-case (tool-server:start-slynk :port $slynk)
+  (error (c) (format *error-output* \"~&tool-server: slynk: ~A~%\" c)))"
+
+if [ "$mode" = repl ]; then
+  exec sbcl --noinform --eval "$load_asdf" --eval "$load_system" \
+    --eval '(tool-server:start)' --eval "$start_slynk" --eval '(in-package #:tool-server-user)'
+else
+  exec sbcl --noinform --non-interactive --eval "$load_asdf" --eval "$load_system" \
+    --eval "$start_slynk" --eval '(tool-server:serve)'
+fi
