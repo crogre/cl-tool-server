@@ -6,7 +6,13 @@
    #:arg-pathname #:arg-directory
    #:*backtrace-on-error*
    ;; Caches
-   #:defcache #:cached #:clear-cache
+   #:defcache #:cached #:cache-get #:cache-put #:clear-cache
+   ;; Utilities
+   #:capture-output #:pmap #:run-in-background #:log-message
+   #:parse-json #:jget #:json-string
+   ;; Terminal
+   #:with-terminal #:terminal-size #:terminal-write #:terminal-flush #:read-key
+   #:terminal-closed #:display-width #:fit-to-width
    ;; Server
    #:start #:stop #:serve #:default-socket-path
    #:start-slynk #:stop-slynk))

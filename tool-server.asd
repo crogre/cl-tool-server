@@ -7,9 +7,14 @@
                 :components ((:file "package")
                              (:file "commands")
                              (:file "cache")
+                             (:file "util")
+                             (:file "json")
+                             (:file "terminal")
                              (:file "server")
                              (:file "slynk")
                              (:file "builtins")))
                (:module "tools"
                 :serial t
-                :components ((:file "files")))))
+                :components ((:file "files")
+                             (:file "git-worktrees")
+                             (:file "git-worktrees-ui")))))

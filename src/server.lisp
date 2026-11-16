@@ -3,20 +3,18 @@
 ;;; Protocol, one request per connection.
 ;;;
 ;;; Client -> server: NUL-terminated UTF-8 fields
-;;;   "1" (protocol version), cwd, argc, argv[0] .. argv[argc-1]
-;;; where argv[0] is the command name.
+;;;   "2" (protocol version), cwd, tty, argc, argv[0] .. argv[argc-1]
+;;; where tty is the client's controlling terminal ("" if none) and argv[0]
+;;; is the command name. The client sends nothing more; the socket becoming
+;;; readable means it went away.
 ;;;
 ;;; Server -> client: frames of a tag byte, a 4-byte big-endian length and the payload
 ;;;   #\O  stdout bytes
 ;;;   #\E  stderr bytes
 ;;;   #\X  exit status as decimal ASCII; always the last frame
 
-(defparameter *protocol-version* "1")
+(defparameter *protocol-version* "2")
 (defparameter *flush-threshold* 16384)
-
-(defun log-message (control &rest args)
-  (format sb-sys:*stderr* "~&tool-server: ~?~%" control args)
-  (force-output sb-sys:*stderr*))
 
 (defun default-socket-path ()
   (or (sb-posix:getenv "TOOL_SERVER_SOCKET")
@@ -96,26 +94,30 @@ Fully buffered: output reaches the client on FINISH-OUTPUT or when the buffer fi
                (t (vector-push-extend byte octets))))))
 
 (defun read-request (in)
-  "Return the client's cwd and argv, or NIL if the client sent nothing."
+  "Return the client's cwd, argv and tty, or NIL if the client sent nothing."
   (flet ((field () (or (read-field in) (error "truncated request"))))
     (let ((version (read-field in)))
       (when version
         (unless (equal version *protocol-version*)
-          (error "unsupported protocol version ~S" version))
+          (error "client speaks protocol ~S, server ~S: rebuild toolc (make) ~
+                  or restart the server" version *protocol-version*))
         (let* ((cwd (field))
+               (tty (field))
                (argc (parse-integer (field)))
                (argv (loop repeat argc collect (field))))
           (when (null argv)
             (error "empty argv"))
-          (values cwd argv))))))
+          (values cwd argv (and (plusp (length tty)) tty)))))))
 
-(defun serve-request (connection cwd argv)
+(defun serve-request (connection cwd argv tty socket-fd)
   (let* ((out (make-instance 'frame-stream :connection connection :tag #\O))
          (err (make-instance 'frame-stream :connection connection :tag #\E))
          (status (let ((*standard-output* out)
                        (*error-output* err)
                        (*standard-input* (make-concatenated-stream))
                        (*package* (find-package '#:tool-server-user))
+                       (*client-tty* tty)
+                       (*client-socket-fd* socket-fd)
                        (*default-pathname-defaults*
                          (uiop:parse-native-namestring cwd :ensure-directory t)))
                    (run-command argv))))
@@ -129,9 +131,11 @@ Fully buffered: output reaches the client on FINISH-OUTPUT or when the buffer fi
          (connection (make-connection stream)))
     (unwind-protect
          (handler-case
-             (multiple-value-bind (cwd argv) (read-request stream)
+             (multiple-value-bind (cwd argv tty) (read-request stream)
                (when cwd
-                 (send-exit connection (serve-request connection cwd argv))))
+                 (send-exit connection
+                            (serve-request connection cwd argv tty
+                                           (sb-bsd-sockets:socket-file-descriptor socket)))))
            (serious-condition (condition)
              (log-message "~A" condition)
              (ignore-errors

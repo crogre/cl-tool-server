@@ -30,6 +30,27 @@ SLY checkout so that its version matches Emacs. It looks for `slynk.asd` in
 straight and elpa locations under `~/.config/emacs` and `~/.emacs.d`, or in
 `$SLYNK_DIR`. It listens on localhost only, where any local user can connect.
 
+## Tools
+
+- `git-worktree-status [-r|--refresh] [REPOSITORY...]` shows each worktree's
+  path, branch, PR and commit age, newest first, with 💩 marking dirty ones.
+  It works like the Python and Emacs versions. A worktree is rescanned only
+  when its index or HEAD ref changes. PRs come from one batched GraphQL call
+  per host. Stale PR answers print at once and refresh in the background.
+  `--refresh` waits for everything. Invoked as a shim on PATH, it also works
+  as `git worktree-status`.
+
+  `-i` browses the list on your terminal. Use j/k to move, space to mark,
+  1–4 to filter or sort by a column, / to filter, d to delete worktrees along
+  with their Bazel output bases, and ? for the rest. Enter prints the chosen
+  path, so a shell function can cd to it:
+
+  ```sh
+  wt() { local d; d=$(git-worktree-status -i) && cd "$d"; }    # bash/zsh
+  function wt; set -l d (git-worktree-status -i); and cd $d; end  # fish
+  ```
+- `list-dir [DIRECTORY...]` and `show-args [ARGS...]` are small examples.
+
 ## Writing a tool
 
 Put it in `tools/` (and add new files to `tool-server.asd`):
@@ -58,6 +79,16 @@ Put it in `tools/` (and add new files to `tool-server.asd`):
   CLI name, or keeps it out of `install-shims`.
 - Commands run in their own thread with `*default-pathname-defaults*` set to
   the client's cwd. Keep shared state thread-safe (caches already are).
+- Helpers: `(capture-output '("git" "status") :directory dir)` returns
+  stdout, success and stderr. It uses posix_spawn, which takes about 2 ms,
+  where SBCL's default fork takes 20–70 ms. `(pmap fn list)` maps in
+  parallel. `(run-in-background name fn)` runs work that outlives the
+  command. `parse-json`, `jget` and `json-string` read and write JSON.
+  `cache-get` / `cache-put` are for entries that expire by TTL rather than
+  by stamp.
+- Interactive commands use `(with-terminal (term) ...)` to draw on the
+  client's terminal, which is in raw mode on the alternate screen, and
+  `read-key` to read keys. Stdout still goes back to the caller as usual.
 - Never call `sb-ext:exit`, because it exits the whole server.
 
 After editing, run `toolc reload`, which recompiles changed files into the
@@ -68,14 +99,19 @@ also redefine functions directly. Other built-ins are `eval`, `cache-stats`,
 ## Protocol
 
 There is one request per connection. The client sends NUL-terminated UTF-8
-fields: `"1"` (version), cwd, argc, then argv (argv[0] is the command name).
+fields: `"2"` (version), cwd, tty, argc, then argv (argv[0] is the command
+name). The tty field is the path of the client's terminal, or empty.
+Interactive commands open that path themselves, since the server runs as the
+same user. If the server leaves the terminal changed, the client restores it
+on exit and on SIGINT, SIGTERM or SIGHUP.
 The server replies with frames, each a tag byte, a 4-byte big-endian length
 and the payload: `O` for stdout, `E` for stderr, and finally `X` with the
 decimal exit status.
 
 ## Not yet supported
 
-- stdin is not forwarded, and commands see an empty stream.
+- stdin is not forwarded, so commands see an empty stream. Interactive
+  commands read the terminal directly instead.
 - Environment variables are not forwarded.
 - Interrupting the client does not interrupt the command. The command runs
   until it next writes output.

@@ -9,17 +9,62 @@
  * src/server.lisp for the protocol.
  */
 #include <errno.h>
+#include <fcntl.h>
 #include <limits.h>
+#include <signal.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
 #include <sys/un.h>
+#include <termios.h>
 #include <unistd.h>
 
 #define CLIENT_NAME "toolc"
 #define EXIT_CLIENT_ERROR 255
+
+/* The controlling terminal, which interactive commands draw on directly.
+ * Kept open so its settings can be put back if the server leaves it raw. */
+static int tty_fd = -1;
+static struct termios tty_saved;
+
+static void restore_terminal(void) {
+  struct termios now;
+  if (tty_fd < 0 || tcgetattr(tty_fd, &now) != 0) return;
+  if (memcmp(&now, &tty_saved, sizeof now) != 0) {
+    static const char reset[] = "\033[?25h\033[?1049l";
+    tcsetattr(tty_fd, TCSANOW, &tty_saved);
+    (void)!write(tty_fd, reset, sizeof reset - 1);
+  }
+}
+
+static void restore_and_reraise(int sig) {
+  restore_terminal();
+  signal(sig, SIG_DFL);
+  raise(sig);
+}
+
+/* The real device path: on /dev/tty, which names "my controlling terminal",
+ * ttyname() returns "/dev/tty", and that means nothing to the server. */
+static const char *open_terminal(void) {
+  const char *name = NULL;
+  for (int fd = 0; fd <= 2 && !name; fd++)
+    if (isatty(fd)) name = ttyname(fd);
+  if (!name) return "";
+  tty_fd = open(name, O_RDWR | O_NOCTTY | O_CLOEXEC);
+  if (tty_fd < 0) return "";
+  if (tcgetattr(tty_fd, &tty_saved) != 0) {
+    close(tty_fd);
+    tty_fd = -1;
+    return "";
+  }
+  atexit(restore_terminal);
+  signal(SIGHUP, restore_and_reraise);
+  signal(SIGTERM, restore_and_reraise);
+  signal(SIGINT, restore_and_reraise);
+  return name;
+}
 
 static void die(const char *what) {
   fprintf(stderr, CLIENT_NAME ": %s: %s\n", what, strerror(errno));
@@ -101,14 +146,18 @@ int main(int argc, char **argv) {
   if (!getcwd(cwd, sizeof cwd)) die("getcwd");
   char count[16];
   snprintf(count, sizeof count, "%d", nargs + 1);
+  char tty[PATH_MAX];
+  snprintf(tty, sizeof tty, "%s", open_terminal());
 
-  size_t size = strlen("1") + 1 + strlen(cwd) + 1 + strlen(count) + 1 + strlen(command) + 1;
+  size_t size = strlen("2") + 1 + strlen(cwd) + 1 + strlen(tty) + 1 + strlen(count) + 1 +
+                strlen(command) + 1;
   for (int i = 0; i < nargs; i++) size += strlen(args[i]) + 1;
   char *request = malloc(size);
   if (!request) die("malloc");
   char *p = request;
-  p = append_field(p, "1");
+  p = append_field(p, "2");
   p = append_field(p, cwd);
+  p = append_field(p, tty);
   p = append_field(p, count);
   p = append_field(p, command);
   for (int i = 0; i < nargs; i++) p = append_field(p, args[i]);
@@ -145,7 +194,7 @@ int main(int argc, char **argv) {
       if (len >= sizeof status || !read_full(fd, status, len))
         protocol_error("bad exit frame");
       status[len] = '\0';
-      return atoi(status);
+      exit(atoi(status));
     }
     case 'O':
     case 'E': {
