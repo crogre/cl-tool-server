@@ -41,10 +41,10 @@ straight and elpa locations under `~/.config/emacs` and `~/.emacs.d`, or in
   `--refresh` waits for everything. Invoked as a shim on PATH, it also works
   as `git worktree-status`.
 
-  `-i` browses the list on your terminal. Use j/k to move, space to mark,
-  1–4 to filter or sort by a column, / to filter, d to delete worktrees along
-  with their Bazel output bases, and ? for the rest. Enter prints the chosen
-  path, so a shell function can cd to it:
+  `-i` browses the list on your terminal. Use j/k to move, ctrl-f/ctrl-b to
+  page, space to mark, 1–4 to filter or sort by a column, / to filter, d to
+  delete worktrees along with their Bazel output bases, and ? for the rest.
+  Enter prints the chosen path, so a shell function can cd to it:
 
   ```sh
   wt() { local d; d=$(git-worktree-status -i) && cd "$d"; }    # bash/zsh

@@ -16,6 +16,7 @@
 (defparameter *help*
   '("j k ↑ ↓         move"
     "PgUp PgDn       move a page; Home End to the first or last row"
+    "^F ^B  ^D ^U    scroll a page, or half a page, down or up"
     "space           mark and move down;  U  unmark all"
     "enter           print the worktree and leave, e.g. cd \"$(git-worktree-status -i)\""
     "d               force-remove the marked worktrees, or the one under the cursor,"
@@ -219,6 +220,10 @@ the sorted one, newest commit first when none is."
            (write-string "j/k move  space mark  enter choose  d delete  1-4 column  / filter  ? help  q quit"
                          out)))))))
 
+(defun list-rows (terminal)
+  "Rows left for worktrees below the header and rule, above the status bar."
+  (max 1 (- (terminal-size terminal) 3)))
+
 (defun ui-draw (ui view)
   (let ((terminal (ui-terminal ui)))
     (multiple-value-bind (rows cols) (terminal-size terminal)
@@ -229,7 +234,7 @@ the sorted one, newest commit first when none is."
           (if (ui-help ui)
               (progn (line "")
                      (dolist (text *help*) (line (concatenate 'string "  " text))))
-              (let* ((visible (max 1 (- rows 3)))
+              (let* ((visible (list-rows terminal))
                      (cursor (ui-cursor ui view))
                      (headers (loop for header in *headers*
                                     for i from 0
@@ -447,17 +452,27 @@ failed, and how many output bases went."
 (defun ui-key (ui key view)
   "Act on KEY; return true to leave."
   (let* ((cursor (ui-cursor ui view))
-         (page (max 1 (- (nth-value 0 (terminal-size (ui-terminal ui))) 4))))
+         (page (max 1 (- (nth-value 0 (terminal-size (ui-terminal ui))) 4)))
+         (visible (list-rows (ui-terminal ui))))
     (flet ((move-to (index)
              (when view
                (setf (ui-cursor-path ui)
-                     (wt-path (car (nth (max 0 (min (1- (length view)) index)) view)))))))
+                     (wt-path (car (nth (max 0 (min (1- (length view)) index)) view))))))
+           (scroll (amount)
+             "Move the list by AMOUNT rows, as vim does, so the cursor keeps its
+place on screen until an end stops the list; return where the cursor goes."
+             (setf (ui-top ui) (max 0 (min (+ (ui-top ui) amount) (- (length view) visible))))
+             (+ cursor amount)))
       (setf (ui-message ui) nil)
       (case key
         ((:up #\k #.(code-char 16)) (move-to (1- cursor)))
         ((:down #\j #.(code-char 14)) (move-to (1+ cursor)))
         (:page-up (move-to (- cursor page)))
         (:page-down (move-to (+ cursor page)))
+        (#.(code-char 6) (move-to (scroll visible))) ; ^F
+        (#.(code-char 2) (move-to (scroll (- visible)))) ; ^B
+        (#.(code-char 4) (move-to (scroll (ceiling visible 2)))) ; ^D
+        (#.(code-char 21) (move-to (scroll (- (ceiling visible 2))))) ; ^U
         (:home (move-to 0))
         (:end (move-to (1- (length view))))
         (#\Space
