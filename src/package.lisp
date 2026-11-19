@@ -12,7 +12,8 @@
    #:parse-json #:jget #:json-string
    ;; Terminal
    #:with-terminal #:terminal-size #:terminal-write #:terminal-flush #:read-key
-   #:terminal-closed #:display-width #:fit-to-width
+   #:terminal-closed #:display-width #:fit-to-width #:fit-spans-to-width
+   #:terminal-suspend #:terminal-resume #:run-on-terminal
    ;; Server
    #:start #:stop #:serve #:default-socket-path #:server-socket-path
    #:start-slynk #:stop-slynk))

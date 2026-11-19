@@ -14,16 +14,20 @@
 (defstruct (terminal (:constructor %make-terminal (fd output saved)))
   fd output saved (pending '()))
 
+(defun char-width (char)
+  "Terminal columns CHAR takes; emoji and other wide characters take two."
+  (if (>= (char-code char) #x2600) 2 1))
+
 (defun display-width (string)
-  "Terminal columns STRING takes; emoji and other wide characters take two."
-  (loop for char across string sum (if (>= (char-code char) #x2600) 2 1)))
+  "Terminal columns STRING takes."
+  (loop for char across string sum (char-width char)))
 
 (defun fit-to-width (string width)
   "STRING cut or padded with spaces to exactly WIDTH columns."
   (let ((used 0))
     (with-output-to-string (out)
       (loop for char across string
-            for w = (if (>= (char-code char) #x2600) 2 1)
+            for w = (char-width char)
             while (<= (+ used w) width)
             do (write-char char out) (incf used w))
       (loop repeat (- width used) do (write-char #\Space out)))))
@@ -192,3 +196,71 @@ Keys are characters (control keys as their control characters) or one of
               (error 'terminal-closed))
             (setf (terminal-pending terminal) (decode-keys (subseq buffer 0 count)))
             (pop (terminal-pending terminal)))))))
+
+;;; Styled lines. A span is (TEXT . SGR), SGR being the parameters of an
+;;; ESC[...m sequence such as "1;33", or NIL for the default look.
+
+(defun fit-spans-to-width (spans width &optional base)
+  "SPANS drawn into exactly WIDTH columns, cut or padded with spaces. BASE, an
+SGR string such as \"7\", applies to every span and to the padding."
+  (let ((used 0)
+        (base (if (and base (plusp (length base))) (concatenate 'string ";" base) "")))
+    (with-output-to-string (out)
+      (loop for (text . sgr) in spans
+            while (< used width)
+            do (format out "~C[0~@[;~A~]~Am" #\Esc sgr base)
+               (loop for char across text
+                     for w = (char-width char)
+                     while (<= (+ used w) width)
+                     do (write-char char out) (incf used w)))
+      (format out "~C[0~Am" #\Esc base)
+      (loop repeat (- width used) do (write-char #\Space out))
+      (format out "~C[0m" #\Esc))))
+
+;;; Handing the terminal to another program, such as an editor.
+
+(defun terminal-suspend (terminal)
+  "Leave the alternate screen and give TERMINAL its original settings back."
+  (let ((output (terminal-output terminal)))
+    (write-string (format nil "~C[?25h~C[?1049l" #\Esc #\Esc) output)
+    (finish-output output))
+  (sb-posix:tcsetattr (terminal-fd terminal) sb-posix:tcsanow (terminal-saved terminal)))
+
+(defun terminal-resume (terminal)
+  "Undo TERMINAL-SUSPEND, dropping keys typed meanwhile."
+  (raw-mode (terminal-fd terminal))
+  (sb-posix:tcflush (terminal-fd terminal) sb-posix:tciflush)
+  (setf (terminal-pending terminal) '())
+  (let ((output (terminal-output terminal)))
+    (write-string (format nil "~C[?1049h~C[?25l~C[2J" #\Esc #\Esc #\Esc) output)
+    (finish-output output)))
+
+(defun run-on-terminal (terminal program arguments
+                        &key directory environment banner pause-on-failure)
+  "Run PROGRAM with ARGUMENTS on TERMINAL as its stdin, stdout and stderr,
+with the screen and settings suspended meanwhile, and return its exit status.
+BANNER is printed first. With PAUSE-ON-FAILURE a failing program's output
+stays up until a key is pressed. The program has no controlling terminal,
+since the tty belongs to the client's session: job control (^Z) and
+SIGWINCH do not reach it."
+  (terminal-suspend terminal)
+  (unwind-protect
+       (let* ((stream (terminal-output terminal))
+              (status (progn
+                        (when banner
+                          (format stream "~A~%" banner)
+                          (finish-output stream))
+                        (sb-ext:process-exit-code
+                         (sb-ext:run-program program arguments
+                                             :search t :wait t
+                                             :input stream :output stream :error stream
+                                             :directory directory
+                                             :environment (or environment
+                                                              (sb-ext:posix-environ)))))))
+         (when (and pause-on-failure (/= status 0))
+           (format stream "~&exit status ~D; press any key to return " status)
+           (finish-output stream)
+           (raw-mode (terminal-fd terminal))
+           (loop until (read-key terminal 1000)))
+         status)
+    (terminal-resume terminal)))

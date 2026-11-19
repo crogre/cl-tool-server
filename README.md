@@ -42,12 +42,11 @@ straight and elpa locations under `~/.config/emacs` and `~/.emacs.d`, or in
   as `git worktree-status`.
 
   `-i` browses the list on your terminal. Use j/k to move, ctrl-f/ctrl-b to
-  page, space to mark,
-  1–4 to filter or sort by a column, / to filter, d to delete worktrees along
-  with their Bazel output bases, and ? for the rest. Deletes run in the
-  background while you keep browsing; leaving waits for them, and a second q
-  leaves them to finish in the server. Enter prints the chosen path, so a
-  shell function can cd to it:
+  page, space to mark, 1–4 to filter or sort by a column, / to filter, d to
+  delete worktrees along with their Bazel output bases, and ? for the rest.
+  Deletes run in the background while you keep browsing; leaving waits for
+  them, and a second q leaves them to finish in the server. Enter prints the
+  chosen path, so a shell function can cd to it:
 
   ```sh
   wt() { local d; d=$(git-worktree-status -i) && cd "$d"; }    # bash/zsh
@@ -65,6 +64,25 @@ straight and elpa locations under `~/.config/emacs` and `~/.emacs.d`, or in
   added to `$SKIP` for pre-commit. It refuses to run with staged changes.
   stdin is not forwarded, so git cannot prompt: the push needs an ssh agent
   or a credential helper. It is a port of the bash script `trigger-ci`.
+- `grit [PATH]` is a keyboard-driven, Magit-style Git client, a port of
+  [grit](https://github.com/crogre/grit) to this image. It shows untracked,
+  unstaged, staged and unmerged files with foldable diffs, and stages,
+  unstages or discards whole files, hunks, single lines (`v`) or ranges of
+  files (`V`).
+  It also commits and amends (`c c`, `c a`), rebases (`r e`/`c`/`a`/`s`),
+  manages branches (`b`), pushes, fetches and pulls (`p`, `f`, `F`), lists
+  and creates worktrees (`w`), and has a commit graph (`l l`, `l b`) with
+  commit, range and vs-HEAD diffs. Press `?` for every key. Outside a
+  checkout it prints a hint and exits 2.
+
+  Unlike the original, which links libgit2, it runs the `git` CLI, so the
+  installed git's config and hooks apply. Commit messages open in the editor
+  `git var GIT_EDITOR` names, run on the client's terminal; since the
+  environment is not forwarded, that is core.editor or the *server's*
+  GIT_EDITOR, VISUAL or EDITOR. `r R` hands rebase conflicts to an AI command
+  set in `~/.config/grit/config.toml` or `.grit/config.toml`
+  (`[ai] command = "claude -p"`, optional `verify_command`), with the prompt
+  in `resolve.md` next to it.
 - `list-dir [DIRECTORY...]` and `show-args [ARGS...]` are small examples.
 
 ## Writing a tool
@@ -110,7 +128,13 @@ Put it in `tools/` (and add new files to `tool-server.asd`):
 - Interactive commands use `(with-terminal (term) ...)` to draw on the
   client's terminal, which is in raw mode on the alternate screen, and
   `read-key` to read keys. Stdout still goes back to the caller as usual.
+  `fit-spans-to-width` renders a line of styled spans, and `run-on-terminal`
+  hands the terminal to another program, such as an editor, meanwhile.
 - Never call `sb-ext:exit`, because it exits the whole server.
+
+Tests run with `sbcl --non-interactive --eval '(require :asdf)' --eval
+'(asdf:load-asd (truename "tool-server.asd"))' --eval '(asdf:test-system
+"tool-server")'`.
 
 After editing, run `toolc reload`, which recompiles changed files into the
 running image. Caches survive the reload. With `--repl` or SLY, you can
