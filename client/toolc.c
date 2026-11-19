@@ -4,9 +4,9 @@
  *   toolc COMMAND [ARGS...]
  *   COMMAND [ARGS...]          (through a symlink named COMMAND -> toolc)
  *
- * Sends cwd and argv over the server's unix socket, copies the stdout/stderr
- * frames it gets back to fd 1/2 and exits with the command's status. See
- * src/server.lisp for the protocol.
+ * Sends cwd, argv and the environment over the server's unix socket, copies
+ * the stdout/stderr frames it gets back to fd 1/2 and exits with the command's
+ * status. See src/server.lisp for the protocol.
  */
 #include <errno.h>
 #include <fcntl.h>
@@ -20,6 +20,8 @@
 #include <sys/un.h>
 #include <termios.h>
 #include <unistd.h>
+
+extern char **environ;
 
 #define CLIENT_NAME "toolc"
 #define EXIT_CLIENT_ERROR 255
@@ -146,21 +148,28 @@ int main(int argc, char **argv) {
   if (!getcwd(cwd, sizeof cwd)) die("getcwd");
   char count[16];
   snprintf(count, sizeof count, "%d", nargs + 1);
+  int nenv = 0;
+  while (environ[nenv]) nenv++;
+  char envc[16];
+  snprintf(envc, sizeof envc, "%d", nenv);
   char tty[PATH_MAX];
   snprintf(tty, sizeof tty, "%s", open_terminal());
 
-  size_t size = strlen("2") + 1 + strlen(cwd) + 1 + strlen(tty) + 1 + strlen(count) + 1 +
-                strlen(command) + 1;
+  size_t size = strlen("3") + 1 + strlen(cwd) + 1 + strlen(tty) + 1 + strlen(count) + 1 +
+                strlen(command) + 1 + strlen(envc) + 1;
   for (int i = 0; i < nargs; i++) size += strlen(args[i]) + 1;
+  for (int i = 0; i < nenv; i++) size += strlen(environ[i]) + 1;
   char *request = malloc(size);
   if (!request) die("malloc");
   char *p = request;
-  p = append_field(p, "2");
+  p = append_field(p, "3");
   p = append_field(p, cwd);
   p = append_field(p, tty);
   p = append_field(p, count);
   p = append_field(p, command);
   for (int i = 0; i < nargs; i++) p = append_field(p, args[i]);
+  p = append_field(p, envc);
+  for (int i = 0; i < nenv; i++) p = append_field(p, environ[i]);
 
   struct sockaddr_un addr = {.sun_family = AF_UNIX};
   char path[PATH_MAX];

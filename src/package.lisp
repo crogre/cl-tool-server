@@ -3,18 +3,18 @@
   (:export
    ;; Defining commands
    #:defcommand #:fail #:exit-with #:command-failed
-   #:arg-pathname #:arg-directory
+   #:arg-pathname #:arg-directory #:*client-environment* #:client-getenv
    #:*backtrace-on-error*
    ;; Caches
    #:defcache #:cached #:cache-get #:cache-put #:clear-cache
    ;; Utilities
-   #:capture-output #:pmap #:run-in-background #:log-message
+   #:capture-output #:run-streaming #:pmap #:run-in-background #:log-message
    #:parse-json #:jget #:json-string
    ;; Terminal
    #:with-terminal #:terminal-size #:terminal-write #:terminal-flush #:read-key
    #:terminal-closed #:display-width #:fit-to-width
    ;; Server
-   #:start #:stop #:serve #:default-socket-path
+   #:start #:stop #:serve #:default-socket-path #:server-socket-path
    #:start-slynk #:stop-slynk))
 
 (defpackage #:tool-server-user

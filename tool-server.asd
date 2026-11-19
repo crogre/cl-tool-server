@@ -17,4 +17,5 @@
                 :serial t
                 :components ((:file "files")
                              (:file "git-worktrees")
-                             (:file "git-worktrees-ui")))))
+                             (:file "git-worktrees-ui")
+                             (:file "trigger-ci")))))

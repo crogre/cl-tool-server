@@ -59,6 +59,17 @@ strings, so LAMBDA-LIST may only use required, &optional and &rest parameters."
              (&required (incf min) (incf max))
              (&optional (incf max))))))))
 
+(defvar *client-environment* '()
+  "The calling client's environment as NAME=value strings, the format
+SB-EXT:POSIX-ENVIRON uses.")
+
+(defun client-getenv (name)
+  "Value of NAME in the client's environment, or NIL."
+  (let ((prefix (concatenate 'string name "=")))
+    (dolist (entry *client-environment*)
+      (when (uiop:string-prefix-p prefix entry)
+        (return (subseq entry (length prefix)))))))
+
 (define-condition command-failed (error)
   ((message :initarg :message :reader command-failed-message)
    (code :initarg :code :initform 1 :reader command-failed-code))

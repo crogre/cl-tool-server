@@ -3,17 +3,18 @@
 ;;; Protocol, one request per connection.
 ;;;
 ;;; Client -> server: NUL-terminated UTF-8 fields
-;;;   "2" (protocol version), cwd, tty, argc, argv[0] .. argv[argc-1]
-;;; where tty is the client's controlling terminal ("" if none) and argv[0]
-;;; is the command name. The client sends nothing more; the socket becoming
-;;; readable means it went away.
+;;;   "3" (protocol version), cwd, tty, argc, argv[0] .. argv[argc-1],
+;;;   envc, env[0] .. env[envc-1]
+;;; where tty is the client's controlling terminal ("" if none), argv[0] is
+;;; the command name and each env entry is NAME=value. The client sends
+;;; nothing more; the socket becoming readable means it went away.
 ;;;
 ;;; Server -> client: frames of a tag byte, a 4-byte big-endian length and the payload
 ;;;   #\O  stdout bytes
 ;;;   #\E  stderr bytes
 ;;;   #\X  exit status as decimal ASCII; always the last frame
 
-(defparameter *protocol-version* "2")
+(defparameter *protocol-version* "3")
 (defparameter *flush-threshold* 16384)
 
 (defun default-socket-path ()
@@ -94,7 +95,8 @@ Fully buffered: output reaches the client on FINISH-OUTPUT or when the buffer fi
                (t (vector-push-extend byte octets))))))
 
 (defun read-request (in)
-  "Return the client's cwd, argv and tty, or NIL if the client sent nothing."
+  "Return the client's cwd, argv, tty and environment, or NIL if the client
+sent nothing."
   (flet ((field () (or (read-field in) (error "truncated request"))))
     (let ((version (read-field in)))
       (when version
@@ -104,12 +106,13 @@ Fully buffered: output reaches the client on FINISH-OUTPUT or when the buffer fi
         (let* ((cwd (field))
                (tty (field))
                (argc (parse-integer (field)))
-               (argv (loop repeat argc collect (field))))
+               (argv (loop repeat argc collect (field)))
+               (env (loop repeat (parse-integer (field)) collect (field))))
           (when (null argv)
             (error "empty argv"))
-          (values cwd argv (and (plusp (length tty)) tty)))))))
+          (values cwd argv (and (plusp (length tty)) tty) env))))))
 
-(defun serve-request (connection cwd argv tty socket-fd)
+(defun serve-request (connection cwd argv tty env socket-fd)
   (let* ((out (make-instance 'frame-stream :connection connection :tag #\O))
          (err (make-instance 'frame-stream :connection connection :tag #\E))
          (status (let ((*standard-output* out)
@@ -117,6 +120,7 @@ Fully buffered: output reaches the client on FINISH-OUTPUT or when the buffer fi
                        (*standard-input* (make-concatenated-stream))
                        (*package* (find-package '#:tool-server-user))
                        (*client-tty* tty)
+                       (*client-environment* env)
                        (*client-socket-fd* socket-fd)
                        (*default-pathname-defaults*
                          (uiop:parse-native-namestring cwd :ensure-directory t)))
@@ -131,10 +135,10 @@ Fully buffered: output reaches the client on FINISH-OUTPUT or when the buffer fi
          (connection (make-connection stream)))
     (unwind-protect
          (handler-case
-             (multiple-value-bind (cwd argv tty) (read-request stream)
+             (multiple-value-bind (cwd argv tty env) (read-request stream)
                (when cwd
                  (send-exit connection
-                            (serve-request connection cwd argv tty
+                            (serve-request connection cwd argv tty env
                                            (sb-bsd-sockets:socket-file-descriptor socket)))))
            (serious-condition (condition)
              (log-message "~A" condition)
@@ -223,6 +227,11 @@ Fully buffered: output reaches the client on FINISH-OUTPUT or when the buffer fi
             *server* server)
       (log-message "listening on ~A" path)
       server)))
+
+(defun server-socket-path ()
+  "Path of the socket this image is listening on, or NIL."
+  (let ((server *server*))
+    (and server (server-path server))))
 
 (defun stop ()
   "Stop accepting connections. Commands already running are left to finish."

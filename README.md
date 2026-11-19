@@ -1,9 +1,10 @@
 # tool-server
 
 A long-running SBCL image holding compiled tools and their caches. Shell
-commands are thin symlinks to a small C client (`toolc`) that forwards argv and
-cwd over a unix socket and relays stdout, stderr and the exit status. A call
-costs about 3 ms, with no Lisp startup, and caches stay warm between calls.
+commands are thin symlinks to a small C client (`toolc`) that forwards argv,
+cwd and environment over a unix socket and relays stdout, stderr and the exit
+status. A call costs about 3 ms, with no Lisp startup, and caches stay warm
+between calls.
 
 ## Quick start
 
@@ -49,6 +50,18 @@ straight and elpa locations under `~/.config/emacs` and `~/.emacs.d`, or in
   wt() { local d; d=$(git-worktree-status -i) && cd "$d"; }    # bash/zsh
   function wt; set -l d (git-worktree-status -i); and cd $d; end  # fish
   ```
+- `trigger-ci [--base <ref>] [--no-push] [-n|--dry-run]` drops CI-skip
+  markers (`[skip ci]`, `[ci skip]`, `[no ci]`, `[skip actions]`,
+  `***NO_CI***`, any case) from the messages of the commits since the merge-base
+  with origin/main (or origin/master, or `--base`), then runs
+  `git push --force-with-lease`. A marked HEAD alone is amended; otherwise a
+  non-interactive `git rebase -i` rewords every commit, with this image as
+  both rebase editors (the hidden `trigger-ci-edit` command). Git runs in the
+  caller's cwd and environment, with
+  `scripts-should-be-executable,no-mixed-line-ending,no-trailing-whitespace`
+  added to `$SKIP` for pre-commit. It refuses to run with staged changes.
+  stdin is not forwarded, so git cannot prompt: the push needs an ssh agent
+  or a credential helper. It is a port of the bash script `trigger-ci`.
 - `list-dir [DIRECTORY...]` and `show-args [ARGS...]` are small examples.
 
 ## Writing a tool
@@ -79,13 +92,18 @@ Put it in `tools/` (and add new files to `tool-server.asd`):
   CLI name, or keeps it out of `install-shims`.
 - Commands run in their own thread with `*default-pathname-defaults*` set to
   the client's cwd. Keep shared state thread-safe (caches already are).
+- `*client-environment*` holds the caller's environment as `NAME=value`
+  strings, and `(client-getenv "NAME")` reads one.
 - Helpers: `(capture-output '("git" "status") :directory dir)` returns
   stdout, success and stderr. It uses posix_spawn, which takes about 2 ms,
-  where SBCL's default fork takes 20–70 ms. `(pmap fn list)` maps in
-  parallel. `(run-in-background name fn)` runs work that outlives the
-  command. `parse-json`, `jget` and `json-string` read and write JSON.
-  `cache-get` / `cache-put` are for entries that expire by TTL rather than
-  by stamp.
+  where SBCL's default fork takes 20–70 ms. The subprocess gets the server's
+  environment unless you pass `:environment`, for example
+  `*client-environment*`. `run-streaming` takes the same arguments, relays
+  the merged stdout and stderr to the caller's stderr line by line, and
+  returns the exit status. `(pmap fn list)` maps in parallel.
+  `(run-in-background name fn)` runs work that outlives the command.
+  `parse-json`, `jget` and `json-string` read and write JSON. `cache-get` /
+  `cache-put` are for entries that expire by TTL rather than by stamp.
 - Interactive commands use `(with-terminal (term) ...)` to draw on the
   client's terminal, which is in raw mode on the alternate screen, and
   `read-key` to read keys. Stdout still goes back to the caller as usual.
@@ -99,11 +117,12 @@ also redefine functions directly. Other built-ins are `eval`, `cache-stats`,
 ## Protocol
 
 There is one request per connection. The client sends NUL-terminated UTF-8
-fields: `"2"` (version), cwd, tty, argc, then argv (argv[0] is the command
-name). The tty field is the path of the client's terminal, or empty.
-Interactive commands open that path themselves, since the server runs as the
-same user. If the server leaves the terminal changed, the client restores it
-on exit and on SIGINT, SIGTERM or SIGHUP.
+fields: `"3"` (version), cwd, tty, argc, then argv (argv[0] is the command
+name), then envc and the environment as `NAME=value` entries. The tty field
+is the path of the client's terminal, or empty. Interactive commands open
+that path themselves, since the server runs as the same user. If the server
+leaves the terminal changed, the client restores it on exit and on SIGINT,
+SIGTERM or SIGHUP.
 The server replies with frames, each a tag byte, a 4-byte big-endian length
 and the payload: `O` for stdout, `E` for stderr, and finally `X` with the
 decimal exit status.
@@ -112,6 +131,5 @@ decimal exit status.
 
 - stdin is not forwarded, so commands see an empty stream. Interactive
   commands read the terminal directly instead.
-- Environment variables are not forwarded.
 - Interrupting the client does not interrupt the command. The command runs
   until it next writes output.
