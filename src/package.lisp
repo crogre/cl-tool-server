@@ -6,7 +6,7 @@
    #:arg-pathname #:arg-directory #:*client-environment* #:client-getenv
    #:*backtrace-on-error*
    ;; Caches
-   #:defcache #:cached #:cache-get #:cache-put #:clear-cache
+   #:defcache #:cached #:cache-get #:cache-put #:cache-remove #:clear-cache
    ;; Utilities
    #:capture-output #:run-streaming #:pmap #:run-in-background #:log-message
    #:parse-json #:jget #:json-string
