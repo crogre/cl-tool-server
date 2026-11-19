@@ -53,6 +53,10 @@ last one wins."
   (setf (gethash key (cache-table cache)) (cons nil value))
   value)
 
+(defun cache-remove (cache key)
+  "Forget what CACHE holds under KEY."
+  (remhash key (cache-table cache)))
+
 (defun clear-cache (cache)
   (clrhash (cache-table cache))
   (setf (cache-hits cache) 0

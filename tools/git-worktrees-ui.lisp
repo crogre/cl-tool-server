@@ -7,7 +7,8 @@
 ;;; through: picked for filtering (◆), sorted ascending (▲), descending (▼),
 ;;; off. The PR column takes two more steps that sort by state, then number
 ;;; (▲▲ ▼▼). One column filters and one sorts at a time; / filters the picked
-;;; column as you type.
+;;; column as you type. Deletes run in a worker thread, so the list stays live
+;;; while they do.
 
 (defparameter *headers* '("Path" "Branch" "PR" "Age"))
 (defparameter *path-max-width* 70)
@@ -19,12 +20,13 @@
     "space           mark and move down;  U  unmark all"
     "enter           print the worktree and leave, e.g. cd \"$(git-worktree-status -i)\""
     "d               force-remove the marked worktrees, or the one under the cursor,"
-    "                with their Bazel output bases"
+    "                with their Bazel output bases, in the background (· queued, ! failed)"
     "1 2 3 4         cycle the column: pick for filtering ◆, sort ▲, sort ▼, off"
     "                (the PR column also sorts by state, then number: ▲▲ ▼▼)"
     "/               filter the picked column as you type; enter keeps it, esc drops it"
     "r  R            reload;  R also rescans every worktree and re-asks GitHub"
     "q  esc  ^C      leave without choosing (esc clears a filter first)"
+    "                Leaving waits for running deletes; q again leaves them to finish alone"
     ""
     "Press any key to return."))
 
@@ -51,7 +53,35 @@
   (help nil)
   (chosen nil)
   (closed nil)             ; set when the UI is gone; the loader stops scanning
+  (deletion (make-deletion))
+  (quitting nil)           ; left, but waiting for deletes to finish
   (last-screen nil))
+
+(defstruct (deletion (:conc-name del-))
+  "Worktrees queued for removal, worked off one at a time by WORKER. The UI
+thread only reads this, under LOCK, and draws it."
+  (lock (sb-thread:make-mutex :name "worktree ui deletes"))
+  (queue '())
+  (states (make-hash-table :test 'equal)) ; path -> :queued, :removing or why it failed
+  (worker nil)
+  (current nil)
+  (done 0) (total 0) (removed 0) (purged 0) (failures '())
+  (report nil))                           ; summary of a finished run, until shown
+
+(defmacro with-deletion ((var ui) &body body)
+  `(let ((,var (ui-deletion ,ui)))
+     (sb-thread:with-mutex ((del-lock ,var)) ,@body)))
+
+(defun delete-state (ui path)
+  "NIL, :QUEUED, :REMOVING or why removing the worktree at PATH failed."
+  (with-deletion (d ui) (gethash path (del-states d))))
+
+(defun pending-p (ui path)
+  (member (delete-state ui path) '(:queued :removing)))
+
+(defun ui-deleting (ui)
+  "How many deletes are queued or running."
+  (with-deletion (d ui) (- (del-total d) (del-done d))))
 
 (defun ui-worktrees (ui)
   (loop for repo in (ui-repos ui) append (repo-worktrees repo)))
@@ -106,10 +136,12 @@
      :name "worktree ui loader")))
 
 (defun ui-reload (ui refresh)
-  (if (ui-loading ui)
-      (setf (ui-message ui) "Still loading")
+  ;; The delete worker edits the repos it was given; a reload would replace them.
+  (if (or (ui-loading ui) (plusp (ui-deleting ui)))
+      (setf (ui-message ui) (if (ui-loading ui) "Still loading" "Still deleting"))
       (handler-case
           (progn
+            (with-deletion (d ui) (clrhash (del-states d)))
             (setf (ui-repos ui) (mapcar #'load-repo (ui-directories ui)))
             (setf (ui-marked ui) (intersection (ui-marked ui)
                                                (mapcar #'wt-path (ui-worktrees ui))
@@ -197,11 +229,23 @@ the sorted one, newest commit first when none is."
 
 (defun ui-status (ui view)
   (let* ((pick (column-in-state ui '(:pick)))
-         (filter-note (format nil "filter[~A]: ~A" (nth (or pick 0) *headers*) (ui-filter ui))))
+         (filter-note (format nil "filter[~A]: ~A" (nth (or pick 0) *headers*) (ui-filter ui)))
+         (entry (nth (ui-cursor ui view) view))
+         (failure (and entry (delete-state ui (wt-path (car entry))))))
     (cond
       ((ui-editing ui) (format nil "~A▏  (enter keep, esc drop)" filter-note))
       ((ui-busy ui) (format nil "~A ~C" (ui-busy ui) (spinner)))
       ((ui-message ui))
+      ((ui-quitting ui)
+       (format nil "Waiting for ~D delete(s) ~C  q leaves them running in the background"
+               (ui-deleting ui) (spinner)))
+      ((stringp failure) (format nil "Removing failed: ~A" failure))
+      ((plusp (ui-deleting ui))
+       (with-deletion (d ui)
+         (format nil "Removing ~C [~A] ~D/~D ~@[~A~]" (spinner)
+                 (progress-bar (del-done d) (del-total d) 16)
+                 (min (del-total d) (1+ (del-done d))) (del-total d)
+                 (and (del-current d) (abbreviate-home (del-current d))))))
       ((ui-loading ui)
        (format nil "Loading ~C [~A] ~D/~D~@[  ·  ~A~]" (spinner)
                (progress-bar (ui-scan-done ui) (ui-scan-total ui) 16)
@@ -258,11 +302,21 @@ the sorted one, newest commit first when none is."
                       (loop for index from (ui-top ui) below (min (length view) (+ (ui-top ui) visible))
                             for (wt . row) = (nth index view)
                             for marked = (member (wt-path wt) (ui-marked ui) :test #'string=)
-                            do (line (format nil "~:[ ~;▶~]~:[ ~;*~]  ~A" (= index cursor) marked
+                            for state = (delete-state ui (wt-path wt))
+                            do (line (format nil "~:[ ~;▶~]~A  ~A" (= index cursor)
+                                             (case state
+                                               ((nil) (if marked "*" " "))
+                                               (:queued "·")
+                                               (:removing (spinner))
+                                               (t "!"))
                                              (cells row))
                                      (concatenate 'string
                                                   (if (= index cursor) (format nil "~A[7m" esc) "")
-                                                  (if marked (format nil "~A[1m" esc) ""))))))))
+                                                  (if marked (format nil "~A[1m" esc) "")
+                                                  (case state
+                                                    ((nil) "")
+                                                    ((:queued :removing) (format nil "~A[2m" esc))
+                                                    (t (format nil "~A[31m" esc))))))))))
           (let ((body (nreverse lines)))
             (with-output-to-string (out)
               (loop for text in body
@@ -354,12 +408,12 @@ failed, and how many output bases went."
           (values nil (count-if (lambda (base) (ignore-errors (purge-output-base base) t)) bases))
           (values (trim (if (plusp (length err)) err out)) 0)))))
 
-(defun ui-wait-for (ui view function busy)
+(defun ui-wait-for (ui function busy)
   "Call FUNCTION in a thread, keeping the screen alive with BUSY in the status bar."
   (setf (ui-busy ui) busy)
   (let ((thread (sb-thread:make-thread function :name "worktree ui work")))
     (loop while (sb-thread:thread-alive-p thread)
-          do (ui-render ui view)
+          do (ui-render ui (ui-view ui))
              (read-key (ui-terminal ui) 80))
     (setf (ui-busy ui) nil)
     (sb-thread:join-thread thread :default nil)))
@@ -368,15 +422,73 @@ failed, and how many output bases went."
   "Whether WT is its repository's main worktree, which git never removes."
   (directory-p (join (wt-path wt) ".git")))
 
+(defun delete-worker (ui)
+  "Remove queued worktrees until none are left. Only state changes here; the
+UI thread draws it."
+  (loop
+    (let ((wt (with-deletion (d ui)
+                (let ((wt (pop (del-queue d))))
+                  (if wt
+                      (setf (gethash (wt-path wt) (del-states d)) :removing
+                            (del-current d) (wt-path wt))
+                      (let ((report (format nil "Removed ~D worktree(s)~:[~*~;, ~D Bazel output base(s)~]~@[; ~D failed: ~{~A~^; ~}~]"
+                                            (del-removed d) (plusp (del-purged d)) (del-purged d)
+                                            (and (del-failures d) (length (del-failures d)))
+                                            (reverse (del-failures d)))))
+                        (when (ui-closed ui)
+                          (log-message "git-worktree-status: ~A" report))
+                        (setf (del-report d) report
+                              (del-worker d) nil (del-current d) nil (del-failures d) '()
+                              (del-done d) 0 (del-total d) 0 (del-removed d) 0 (del-purged d) 0)))
+                  wt))))
+      (unless wt (return))
+      (multiple-value-bind (failure bases)
+          (handler-case (remove-worktree wt)
+            (error (condition) (values (princ-to-string condition) 0)))
+        (let ((path (wt-path wt)))
+          (with-deletion (d ui)
+            (incf (del-done d))
+            (incf (del-purged d) bases)
+            (cond (failure
+                   (let ((failure (substitute #\Space #\Newline failure)))
+                     (setf (gethash path (del-states d)) failure)
+                     (push failure (del-failures d))))
+                  (t
+                   (incf (del-removed d))
+                   (remhash path (del-states d))
+                   (cache-remove *worktree-scans* path)
+                   (dolist (repo (ui-repos ui))
+                     (setf (repo-worktrees repo)
+                           (remove path (repo-worktrees repo) :key #'wt-path :test #'string=)))))))))))
+
+(defun ui-queue-deletes (ui targets)
+  (with-deletion (d ui)
+    (dolist (wt targets)
+      (setf (gethash (wt-path wt) (del-states d)) :queued))
+    (setf (del-queue d) (append (del-queue d) targets))
+    (incf (del-total d) (length targets))
+    (unless (del-worker d)
+      (setf (del-worker d) (sb-thread:make-thread #'delete-worker :name "worktree ui deletes"
+                                                                  :arguments (list ui)))))
+  ;; Their row shows the delete now; a pending row cannot be marked.
+  (setf (ui-marked ui) (set-difference (ui-marked ui) (mapcar #'wt-path targets)
+                                       :test #'string=)))
+
+(defun ui-take-report (ui)
+  (let ((report (with-deletion (d ui) (shiftf (del-report d) nil))))
+    (when report
+      (setf (ui-message ui) report))))
+
 (defun ui-delete (ui view)
-  (let* ((marked-visible (remove-if-not (lambda (wt) (member (wt-path wt) (ui-marked ui)
+  (let* ((deletable (lambda (wt) (not (or (main-worktree-p wt) (pending-p ui (wt-path wt))))))
+         (marked-visible (remove-if-not (lambda (wt) (member (wt-path wt) (ui-marked ui)
                                                             :test #'string=))
                                         (mapcar #'car view)))
-         (marked (remove-if #'main-worktree-p marked-visible))
+         (marked (remove-if-not deletable marked-visible))
+         (entry (nth (ui-cursor ui view) view))
          (targets (or marked
                       (unless (ui-marked ui)
-                        (let ((entry (nth (ui-cursor ui view) view)))
-                          (and entry (not (main-worktree-p (car entry))) (list (car entry))))))))
+                        (and entry (funcall deletable (car entry)) (list (car entry)))))))
     (cond
       ((and (null targets) (ui-marked ui) (null marked-visible))
        ;; Falling back to the cursor row would delete something never marked,
@@ -384,10 +496,13 @@ failed, and how many output bases went."
        (setf (ui-message ui) (format nil "~D marked worktree(s) hidden by the filter - clear it or unmark"
                                      (length (ui-marked ui)))))
       ((null targets)
-       (setf (ui-message ui) "Nothing to delete (the main worktree cannot be removed)"))
+       (setf (ui-message ui)
+             (if (and entry (null (ui-marked ui)) (pending-p ui (wt-path (car entry))))
+                 "Already being removed"
+                 "Nothing to delete (the main worktree cannot be removed)")))
       (t
        (let ((dirty (count t (ui-wait-for
-                              ui view
+                              ui
                               (lambda ()
                                 (pmap (lambda (wt)
                                         (plusp (length (trim (capture-output
@@ -404,33 +519,13 @@ failed, and how many output bases went."
                                                         :test #'string=))
                                       (ui-marked ui))))
                          (and marked (plusp hidden) hidden))))
-         (ui-render ui view)
-         (let ((key (loop for key = (read-key (ui-terminal ui) 500) when key return key)))
+         ;; Keep drawing: running deletes finish while the question is open.
+         (let ((key (loop (ui-render ui (ui-view ui))
+                          (let ((key (read-key (ui-terminal ui) 80)))
+                            (when key (return key))))))
            (setf (ui-message ui) nil)
            (when (member key '(#\y #\Y))
-             (let ((removed '()) (failures '()) (purged 0) (done 0))
-               (ui-wait-for
-                ui view
-                (lambda ()
-                  (dolist (wt targets)
-                    (setf (ui-busy ui)
-                          (format nil "Removing [~A] ~D/~D ~A"
-                                  (progress-bar done (length targets) 16) (1+ done)
-                                  (length targets) (abbreviate-home (wt-path wt))))
-                    (multiple-value-bind (failure bases) (remove-worktree wt)
-                      (incf purged bases)
-                      (if failure (push failure failures) (push wt removed)))
-                    (incf done)))
-                "Removing")
-               (dolist (repo (ui-repos ui))
-                 (setf (repo-worktrees repo)
-                       (remove-if (lambda (wt) (member wt removed)) (repo-worktrees repo))))
-               (setf (ui-marked ui) (set-difference (ui-marked ui) (mapcar #'wt-path removed)
-                                                    :test #'string=)
-                     (ui-message ui)
-                     (format nil "Removed ~D worktree(s)~:[~*~;, ~D Bazel output base(s)~]~@[; ~D failed: ~{~A~^; ~}~]"
-                             (length removed) (plusp purged) purged
-                             (and failures (length failures)) (reverse failures)))))))))))
+             (ui-queue-deletes ui targets))))))))
 
 ;;; Keys
 
@@ -463,15 +558,19 @@ failed, and how many output bases went."
         (#\Space
          (when view
            (let ((path (wt-path (car (nth cursor view)))))
-             (setf (ui-marked ui) (if (member path (ui-marked ui) :test #'string=)
-                                      (remove path (ui-marked ui) :test #'string=)
-                                      (cons path (ui-marked ui))))
+             (unless (pending-p ui path)
+               (setf (ui-marked ui) (if (member path (ui-marked ui) :test #'string=)
+                                        (remove path (ui-marked ui) :test #'string=)
+                                        (cons path (ui-marked ui)))))
              (move-to (1+ cursor)))))
         (#\U (setf (ui-marked ui) '()))
         (:enter
          (when view
-           (setf (ui-chosen ui) (wt-path (car (nth cursor view))))
-           (return-from ui-key t)))
+           (let ((path (wt-path (car (nth cursor view)))))
+             (if (pending-p ui path)
+                 (setf (ui-message ui) "That worktree is being removed")
+                 (progn (setf (ui-chosen ui) path)
+                        (return-from ui-key t))))))
         (#\d (ui-delete ui view))
         ((#\1 #\2 #\3 #\4) (cycle-column ui (- (char-code key) (char-code #\1))))
         (#\/
@@ -493,12 +592,24 @@ failed, and how many output bases went."
     (let ((view (ui-view ui)))
       (unless (ui-cursor-path ui)
         (setf (ui-cursor-path ui) (and view (wt-path (car (first view))))))
+      (ui-take-report ui)
+      (when (and (ui-quitting ui) (zerop (ui-deleting ui)))
+        (return))
       (ui-render ui view)
-      (let ((key (read-key (ui-terminal ui) (if (ui-loading ui) 80 500))))
+      ;; The timeout doubles as the wakeup that shows a delete finishing.
+      (let ((key (read-key (ui-terminal ui)
+                           (if (or (ui-loading ui) (plusp (ui-deleting ui))) 80 500))))
         (cond ((null key))
+              ((ui-quitting ui)
+               (when (member key '(#\q :escape #.(code-char 3)))
+                 (return)))
               ((ui-help ui) (setf (ui-help ui) nil))
               ((ui-editing ui) (ui-filter-key ui key))
-              ((ui-key ui key view) (return)))))))
+              ((ui-key ui key view)
+               ;; Deletes run on in the server either way; waiting shows how they end.
+               (if (plusp (ui-deleting ui))
+                   (setf (ui-quitting ui) t)
+                   (return))))))))
 
 (defun worktree-ui (directories refresh)
   "Browse the worktrees of DIRECTORIES on the client's terminal; print the
