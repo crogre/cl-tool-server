@@ -39,18 +39,27 @@
   '("GIT_TERMINAL_PROMPT=0" "GIT_EDITOR=true" "GIT_SEQUENCE_EDITOR=true" "GIT_PAGER=cat")
   "Nothing git runs on its own may wait on a terminal it does not have.")
 
+(defun base-environment ()
+  "The client's environment, or the server's outside a command (tests, REPL)."
+  (or *client-environment* (sb-ext:posix-environ)))
+
+(defun base-getenv (name)
+  "Non-empty value of NAME in BASE-ENVIRONMENT, or NIL."
+  (let ((value (if *client-environment* (client-getenv name) (sb-posix:getenv name))))
+    (and value (plusp (length value)) value)))
+
 (defun environment (extra)
-  "The server's environment with EXTRA, \"NAME=value\" strings, taking precedence."
+  "BASE-ENVIRONMENT with EXTRA, \"NAME=value\" strings, taking precedence."
   (flet ((name (entry) (subseq entry 0 (or (position #\= entry) (length entry)))))
     (let ((names (mapcar #'name extra)))
       (append extra (remove-if (lambda (entry) (member (name entry) names :test #'string=))
-                               (sb-ext:posix-environ))))))
+                               (base-environment))))))
 
 (defun run (command directory &key input raw environment plain)
   "Run COMMAND, a list of strings, in native DIRECTORY. Return its stdout, whether
 it exited 0, and its stderr. INPUT is a file for stdin. RAW reads stdout as
 Latin-1, byte for byte. ENVIRONMENT adds to *GIT-ENVIRONMENT*, or with PLAIN
-to the server's own."
+to BASE-ENVIRONMENT alone."
   ;; posix_spawn is far cheaper than fork in this image but ignores
   ;; :DIRECTORY, so a shell changes directory first.
   (multiple-value-bind (out err code)

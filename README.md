@@ -77,12 +77,11 @@ straight and elpa locations under `~/.config/emacs` and `~/.emacs.d`, or in
 
   Unlike the original, which links libgit2, it runs the `git` CLI, so the
   installed git's config and hooks apply. Commit messages open in the editor
-  `git var GIT_EDITOR` names, run on the client's terminal; since the
-  environment is not forwarded, that is core.editor or the *server's*
-  GIT_EDITOR, VISUAL or EDITOR. `r R` hands rebase conflicts to an AI command
-  set in `~/.config/grit/config.toml` or `.grit/config.toml`
-  (`[ai] command = "claude -p"`, optional `verify_command`), with the prompt
-  in `resolve.md` next to it.
+  `git var GIT_EDITOR` names, run on the client's terminal with the client's
+  environment. `r R` hands rebase conflicts to an AI command set in
+  `~/.config/grit/config.toml` or `.grit/config.toml` (`[ai] command =
+  "claude -p"`, optional `verify_command`), with the prompt in `resolve.md`
+  next to it.
 - `list-dir [DIRECTORY...]` and `show-args [ARGS...]` are small examples.
 
 ## Writing a tool
@@ -121,7 +120,9 @@ Put it in `tools/` (and add new files to `tool-server.asd`):
   environment unless you pass `:environment`, for example
   `*client-environment*`. `run-streaming` takes the same arguments, relays
   the merged stdout and stderr to the caller's stderr line by line, and
-  returns the exit status. `(pmap fn list)` maps in parallel.
+  returns the exit status. `(pmap fn list)` maps in parallel; its workers
+  keep the caller's cwd and environment, which a thread you make yourself
+  does not.
   `(run-in-background name fn)` runs work that outlives the command.
   `parse-json`, `jget` and `json-string` read and write JSON. `cache-get` /
   `cache-put` are for entries that expire by TTL rather than by stamp.

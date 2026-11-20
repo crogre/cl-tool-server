@@ -206,10 +206,13 @@
   "Call FUNCTION in a helper thread, keeping the screen alive with a spinner
 and DESCRIPTION in the footer. Returns its values or re-signals its error."
   (let* ((result nil) (failure nil)
+         (env *client-environment*)
          (thread (sb-thread:make-thread
                   (lambda ()
-                    (handler-case (setf result (multiple-value-list (funcall function)))
-                      (error (condition) (setf failure condition))))
+                    ;; New threads see global values, not the command's bindings.
+                    (let ((*client-environment* env))
+                      (handler-case (setf result (multiple-value-list (funcall function)))
+                        (error (condition) (setf failure condition)))))
                   :name "grit work")))
     (setf (app-progress app) (list description (get-internal-real-time) nil))
     (unwind-protect
@@ -311,10 +314,10 @@ and DESCRIPTION in the footer. Returns its values or re-signals its error."
 ;;; The editor
 
 (defun editor-environment ()
-  (environment (if (sb-posix:getenv "TERM") '() '("TERM=xterm-256color"))))
+  (environment (if (base-getenv "TERM") '() '("TERM=xterm-256color"))))
 
 (defun editor-command (repo)
-  "The editor git would use, from the server's environment and git config."
+  "The editor git would use, from the client's environment and git config."
   (let ((out (run (list "git" "var" "GIT_EDITOR") (repo-workdir repo) :plain t)))
     (if (plusp (length (trim out))) (trim out) "vi")))
 
@@ -1291,8 +1294,7 @@ usage: grit [PATH]
 
 Runs on the repository holding PATH, by default the current directory.
 Press ? inside for the keys. Commit messages are edited in the editor git
-would use (core.editor, or GIT_EDITOR, VISUAL or EDITOR in the server's
-environment)."
+would use (GIT_EDITOR, core.editor, VISUAL or EDITOR)."
   (let ((directory (or (string-right-trim "/" (uiop:native-namestring
                                                (if path (arg-directory path) *default-pathname-defaults*)))
                        "/")))

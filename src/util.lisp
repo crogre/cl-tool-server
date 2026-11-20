@@ -49,16 +49,19 @@ STREAM line by line as they arrive. Return its exit status."
 
 (defun pmap (function list &key (workers 8))
   "Map FUNCTION over LIST on up to WORKERS threads, keeping LIST's order.
-Workers see the caller's *DEFAULT-PATHNAME-DEFAULTS* but not its output
-streams. The first error stops the remaining work and is re-signalled here."
+Workers see the caller's *DEFAULT-PATHNAME-DEFAULTS* and *CLIENT-ENVIRONMENT*
+but not its output streams. The first error stops the remaining work and is
+re-signalled here."
   (let* ((items (coerce list 'vector))
          (results (make-array (length items)))
          (next 0)
          (failure nil)
          (lock (sb-thread:make-mutex :name "pmap"))
-         (cwd *default-pathname-defaults*))
+         (cwd *default-pathname-defaults*)
+         (env *client-environment*))
     (flet ((work ()
-             (let ((*default-pathname-defaults* cwd))
+             (let ((*default-pathname-defaults* cwd)
+                   (*client-environment* env))
                (loop
                  (let ((i (sb-thread:with-mutex (lock)
                             (when (and (< next (length items)) (not failure))

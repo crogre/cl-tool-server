@@ -14,8 +14,8 @@
 ;;;   command = "claude -p"
 ;;;   verify_command = "cargo check --quiet"
 ;;;
-;;; GRIT_AI_RESOLVE_COMMAND and GRIT_AI_VERIFY_COMMAND override the files.
-;;; Environment variables are the server's: the client does not send its own.
+;;; GRIT_AI_RESOLVE_COMMAND and GRIT_AI_VERIFY_COMMAND, from the client's
+;;; environment, override the files.
 
 (defparameter *max-resolve-bytes* (* 256 1024)
   "Larger conflicted files are left to the user: they tend to be lock files or
@@ -28,8 +28,7 @@ generated, where a guessed resolution does more harm than good.")
 Conflicted file content follows:")
 
 (defun getenv* (name)
-  (let ((value (sb-posix:getenv name)))
-    (and value (plusp (length value)) value)))
+  (base-getenv name))
 
 (defun parse-toml-string (text start)
   "The TOML basic or literal string starting at START in TEXT, or NIL."
@@ -127,7 +126,7 @@ or :CANCELLED."
                                       :if-output-exists :supersede
                                       :error (uiop:parse-native-namestring err-file)
                                       :if-error-exists :supersede
-                                      :environment (sb-ext:posix-environ))))
+                                      :environment (base-environment))))
     (setf (app-progress app) (list description (get-internal-real-time) t))
     (unwind-protect
          (loop while (sb-ext:process-alive-p process)
