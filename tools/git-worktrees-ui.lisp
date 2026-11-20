@@ -104,7 +104,7 @@ thread only reads this, under LOCK, and draws it."
     (setf (ui-loading ui) t
           (ui-scan-done ui) 0
           (ui-scan-total ui) (length worktrees))
-    (sb-thread:make-thread
+    (make-command-thread
      (lambda ()
        (handler-case
            (let* ((questions (pr-questions repos now refresh))
@@ -112,7 +112,7 @@ thread only reads this, under LOCK, and draws it."
                     (when questions
                       (setf (ui-pr-note ui)
                             (format nil "asking GitHub about ~D branch(es)" (length questions)))
-                      (sb-thread:make-thread
+                      (make-command-thread
                        (lambda ()
                          (let ((failures (handler-case (ask-github-all questions)
                                            (error (condition)

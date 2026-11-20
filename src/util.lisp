@@ -78,12 +78,24 @@ re-signalled here."
         (error failure))
       (coerce results 'list))))
 
+(defun make-command-thread (function &key name)
+  "SB-THREAD:MAKE-THREAD, but FUNCTION sees the caller's *DEFAULT-PATHNAME-DEFAULTS*
+and *CLIENT-ENVIRONMENT*: a new thread sees global values, not the command's
+bindings."
+  (let ((cwd *default-pathname-defaults*)
+        (env *client-environment*))
+    (sb-thread:make-thread (lambda ()
+                             (let ((*default-pathname-defaults* cwd)
+                                   (*client-environment* env))
+                               (funcall function)))
+                           :name name)))
+
 (defun run-in-background (name function)
-  "Call FUNCTION in a thread that outlives the current command. Its output goes
-to the server's stdout; errors are logged rather than reaching any client."
-  (sb-thread:make-thread
-   (lambda ()
-     (handler-case (funcall function)
-       (serious-condition (condition)
-         (log-message "~A: ~A" name condition))))
-   :name name))
+  "Call FUNCTION in a thread that outlives the current command, with the
+caller's cwd and environment. Its output goes to the server's stdout; errors
+are logged rather than reaching any client."
+  (make-command-thread (lambda ()
+                         (handler-case (funcall function)
+                           (serious-condition (condition)
+                             (log-message "~A: ~A" name condition))))
+                       :name name))

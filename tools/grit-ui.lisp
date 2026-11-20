@@ -206,13 +206,10 @@
   "Call FUNCTION in a helper thread, keeping the screen alive with a spinner
 and DESCRIPTION in the footer. Returns its values or re-signals its error."
   (let* ((result nil) (failure nil)
-         (env *client-environment*)
-         (thread (sb-thread:make-thread
+         (thread (make-command-thread
                   (lambda ()
-                    ;; New threads see global values, not the command's bindings.
-                    (let ((*client-environment* env))
-                      (handler-case (setf result (multiple-value-list (funcall function)))
-                        (error (condition) (setf failure condition)))))
+                    (handler-case (setf result (multiple-value-list (funcall function)))
+                      (error (condition) (setf failure condition))))
                   :name "grit work")))
     (setf (app-progress app) (list description (get-internal-real-time) nil))
     (unwind-protect

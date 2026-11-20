@@ -8,7 +8,7 @@
    ;; Caches
    #:defcache #:cached #:cache-get #:cache-put #:cache-remove #:clear-cache
    ;; Utilities
-   #:capture-output #:run-streaming #:pmap #:run-in-background #:log-message
+   #:capture-output #:run-streaming #:pmap #:make-command-thread #:run-in-background #:log-message
    #:parse-json #:jget #:json-string
    ;; Terminal
    #:with-terminal #:terminal-size #:terminal-write #:terminal-flush #:read-key

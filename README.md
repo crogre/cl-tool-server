@@ -120,10 +120,11 @@ Put it in `tools/` (and add new files to `tool-server.asd`):
   environment unless you pass `:environment`, for example
   `*client-environment*`. `run-streaming` takes the same arguments, relays
   the merged stdout and stderr to the caller's stderr line by line, and
-  returns the exit status. `(pmap fn list)` maps in parallel; its workers
-  keep the caller's cwd and environment, which a thread you make yourself
+  returns the exit status. `(pmap fn list)` maps in parallel.
+  `(make-command-thread fn)` starts a thread, and `(run-in-background name
+  fn)` one for work that outlives the command. These and pmap's workers keep
+  the caller's cwd and environment, which a plain `sb-thread:make-thread`
   does not.
-  `(run-in-background name fn)` runs work that outlives the command.
   `parse-json`, `jget` and `json-string` read and write JSON. `cache-get` /
   `cache-put` are for entries that expire by TTL rather than by stamp.
 - Interactive commands use `(with-terminal (term) ...)` to draw on the

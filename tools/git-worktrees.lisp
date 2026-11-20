@@ -335,7 +335,8 @@ Returns NIL, or a message saying why GitHub could not answer."
   (let ((now (unix-now)))
     (multiple-value-bind (out ok err)
         (capture-output (list "gh" "api" "graphql" "--hostname" host
-                              "-f" (concatenate 'string "query=" (pr-query groups))))
+                              "-f" (concatenate 'string "query=" (pr-query groups)))
+                        :environment (or *client-environment* (sb-ext:posix-environ)))
       (let* ((reply (and (plusp (length out)) (ignore-errors (parse-json out))))
              (data (jget reply "data")))
         (when data
@@ -361,7 +362,7 @@ Returns NIL, or a message saying why GitHub could not answer."
         (unless (and ok data)
           (format nil "~A: ~A" host (trim (or (jget reply "errors" 0 "message") err ""))))))))
 
-(defun ask-github-all (questions)
+(defun ask-github-batches (questions)
   "Ask about QUESTIONS, one request per host and batch; return the failures."
   (loop for (host . host-questions) in (group-by #'caar questions)
         nconc (loop for batch in (batches host-questions *pr-query-batch*)
@@ -370,22 +371,43 @@ Returns NIL, or a message saying why GitHub could not answer."
                     for failure = (ask-github host groups)
                     when failure collect failure)))
 
-(defvar *pr-refresh-lock* (sb-thread:make-mutex :name "pull request refresh"))
-(defvar *pr-refresh-running* nil)
+(defvar *pr-lock* (sb-thread:make-mutex :name "pull requests in flight"))
+(defvar *pr-answered* (sb-thread:make-waitqueue :name "pull requests answered"))
+(defvar *pr-in-flight* (make-hash-table :test 'equal)
+  "PR-KEYs some thread is asking GitHub about now.")
+
+(defun question-key (question)
+  (pr-key (first question) (second question)))
+
+(defun ask-github-all (questions &key (wait t))
+  "Ask about QUESTIONS and return the failures. A branch another thread is
+already asking about is left to it; with WAIT, return only once its answer is
+cached too. That thread reports its own failures."
+  (let ((mine '()) (theirs '()))
+    (sb-thread:with-mutex (*pr-lock*)
+      (dolist (question questions)
+        (let ((key (question-key question)))
+          (if (gethash key *pr-in-flight*)
+              (push key theirs)
+              (setf (gethash key *pr-in-flight*) t
+                    mine (cons question mine)))))
+      (setf mine (nreverse mine)))
+    (prog1 (unwind-protect (ask-github-batches mine)
+             (sb-thread:with-mutex (*pr-lock*)
+               (dolist (question mine)
+                 (remhash (question-key question) *pr-in-flight*))
+               (sb-thread:condition-broadcast *pr-answered*)))
+      (when wait
+        (sb-thread:with-mutex (*pr-lock*)
+          (loop while (some (lambda (key) (gethash key *pr-in-flight*)) theirs)
+                do (sb-thread:condition-wait *pr-answered* *pr-lock*)))))))
 
 (defun ask-github-in-background (questions)
-  "Refresh QUESTIONS for the next call, unless a refresh is already running."
-  (sb-thread:with-mutex (*pr-refresh-lock*)
-    (unless *pr-refresh-running*
-      (setf *pr-refresh-running* t)
-      (run-in-background
-       "pull request refresh"
-       (lambda ()
-         (unwind-protect
-              (dolist (failure (ask-github-all questions))
-                (log-message "pull request refresh: ~A" failure))
-           (sb-thread:with-mutex (*pr-refresh-lock*)
-             (setf *pr-refresh-running* nil))))))))
+  "Refresh QUESTIONS for the next call."
+  (run-in-background "pull request refresh"
+                     (lambda ()
+                       (dolist (failure (ask-github-all questions :wait nil))
+                         (log-message "pull request refresh: ~A" failure)))))
 
 ;;; Output
 
@@ -498,7 +520,7 @@ for its keys."
     (multiple-value-bind (questions unknown) (pr-questions repos now refresh)
       (let* ((wait (and questions (or refresh unknown)))
              (pr-thread (when wait
-                          (sb-thread:make-thread
+                          (make-command-thread
                            (lambda ()
                              (handler-case (ask-github-all questions)
                                (error (condition) (list (princ-to-string condition)))))
